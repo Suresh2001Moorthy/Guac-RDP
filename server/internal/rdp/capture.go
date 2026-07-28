@@ -45,13 +45,23 @@ type CaptureClient struct {
 func NewCaptureClient() *CaptureClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Select backend via environment variable (defaults to sdl for compatibility)
+	// Select backend via environment variable (defaults via defaultBackend())
 	backendName := os.Getenv("GUAC_RDP_BACKEND")
 	var backend Backend
-	if backendName == "xfreerdp" {
-		backend = NewXfReeRDPBackend("")
+	if backendName != "" {
+		if backendName == "xfreerdp" {
+			backend = NewXfReeRDPBackend("")
+		} else if backendName == "sdl" {
+			backend = NewSdlBackend("")
+		} else if backendName == "native" {
+			// Try native backend when explicitly requested
+			backend = defaultBackend()
+		} else {
+			backend = defaultBackend()
+		}
 	} else {
-		backend = NewSdlBackend("")
+		// No env var: use build-time default
+		backend = defaultBackend()
 	}
 
 	return &CaptureClient{
