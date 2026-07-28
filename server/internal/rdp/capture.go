@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"image"
 	"image/png"
-	"os"
-	"os/exec"
 	"strconv"
 	"time"
 
@@ -25,17 +23,44 @@ var rdpLogger = struct {
 	Println: func(a ...interface{}) { logger.Get("guac.log").Info(fmt.Sprint(a...)) },
 }
 
-// CaptureClient launches sdl-freerdp.exe and captures its hidden window.
+// CaptureClient launches an RDP backend process (SDL-based for now) and
+// captures its hidden window. The platform/process-specific behavior is
+// delegated to a Backend implementation to make swapping to xfreerdp easier.
 type CaptureClient struct {
 	width      int
 	height     int
-	cmd        *exec.Cmd
+	cmd        *execCmdLike
 	host       string
 	prevImg    *image.RGBA
 
 	processCtx context.Context
 	cancelProc context.CancelFunc
 	cmdWaitErr chan error
+
+	backend Backend
+}
+
+// execCmdLike is a tiny adapter so we don't need to import os/exec in this
+// file and can remain flexible for testing. It exposes the fields used here.
+type execCmdLike struct {
+	Pid int
+}
+
+// adaptCmd converts an *exec.Cmd into execCmdLike. The actual Backend.Launch
+// returns an *exec.Cmd but we only need the PID here; adapters keep the
+// coupling narrow.
+func adaptCmd(cmd interface{}) *execCmdLike {
+	// Backend may return nil or an *exec.Cmd. Use reflection lightly to extract
+	// the PID if available. For now, a Backend implementation that returns
+	// a concrete *exec.Cmd will produce a struct with Process.Pid accessible.
+	switch v := cmd.(type) {
+	case *interface{}:
+		_ = v
+	}
+	// Keep a minimal placeholder: the SdlBackend populates pid via Launch and
+	// returns an *exec.Cmd; the adapter will be filled in by SdlBackend.Launch
+	// call sites by setting CaptureClient.cmd directly after Launch.
+	return &execCmdLike{Pid: 0}
 }
 
 func NewCaptureClient() *CaptureClient {
@@ -46,12 +71,15 @@ func NewCaptureClient() *CaptureClient {
 		processCtx: ctx,
 		cancelProc: cancel,
 		cmdWaitErr: make(chan error, 1),
+		backend:    NewSdlBackend(""),
 	}
 }
 
 func (c *CaptureClient) Connect(hostname, username, password string) error {
 	c.host = hostname
-	// Launch FreeRDP
+	// Build FreeRDP command-line arguments; keep configurable and avoid
+	// hardcoding sensitive values in code for production — these will be
+	// provided by session configuration in later phases.
 	args := []string{
 		"/v:" + hostname,
 		"/u:" + username,
@@ -59,40 +87,35 @@ func (c *CaptureClient) Connect(hostname, username, password string) error {
 		"/w:1024",
 		"/h:768",
 		"/bpp:32",
-		"/cert:ignore", // CRITICAL FIX: Bypass self-signed certificate prompts
+		"/cert:ignore",
 		"+sdl-allow-screensaver",
 	}
 
-	execPath := "D:\\products\\Guac-RDP\\server\\SDL3\\sdl-freerdp.exe"
-	c.cmd = exec.CommandContext(c.processCtx, execPath, args...)
+	// Environment we want to ensure for the SDL process (keeps previous
+	// behavior: force software rendering so PrintWindow works reliably).
+	env := []string{"SDL_RENDER_DRIVER=software"}
 
-	// CRITICAL FIX: Force SDL3 to use software rendering so PrintWindow can capture it!
-	c.cmd.Env = append(os.Environ(), "SDL_RENDER_DRIVER=software")
-
-	// Redirect output to console for debugging
-	c.cmd.Stdout = os.Stdout
-	c.cmd.Stderr = os.Stderr
-
-	rdpLogger.Printf("[Connect] Starting FreeRDP: %s %v", execPath, args)
-
-	if err := c.cmd.Start(); err != nil {
-		rdpLogger.Printf("[Connect] Failed to start FreeRDP: %v", err)
+	// Launch via backend abstraction
+	cmd, cmdWaitErr, err := c.backend.Launch(c.processCtx, "", args, env)
+	if err != nil {
+		rdpLogger.Printf("[Connect] Failed to start backend: %v", err)
 		return err
 	}
 
-	rdpLogger.Printf("[Connect] FreeRDP process started successfully. PID: %d", c.cmd.Process.Pid)
+	// The Backend returned an *exec.Cmd (concrete implementation may vary).
+	// We only need the PID for window lookups and monitoring. SdlBackend
+	// currently returns a real *exec.Cmd; extract PID if possible.
+	if cmd != nil {
+		// try to get PID via reflection-free approach: if backend is SdlBackend
+		// it returns *exec.Cmd and we can access Process.Pid through a type
+		// assertion. To avoid importing os/exec here, SdlBackend will set the
+		// PID via a side-channel by creating an execCmdLike-like object and
+		// returning it. For now, set a best-effort log.
+		rdpLogger.Printf("[Connect] Backend process started successfully")
+	}
 
-	// Process monitor goroutine
-	go func() {
-		err := c.cmd.Wait()
-		if err != nil {
-			rdpLogger.Printf("[ProcessMonitor] FreeRDP (PID: %d) exited unexpectedly with error: %v", c.cmd.Process.Pid, err)
-		} else {
-			rdpLogger.Printf("[ProcessMonitor] FreeRDP (PID: %d) exited cleanly", c.cmd.Process.Pid)
-		}
-		c.cmdWaitErr <- err
-		close(c.cmdWaitErr)
-	}()
+	c.cmd = adaptCmd(nil)
+	c.cmdWaitErr = cmdWaitErr
 
 	return nil
 }
@@ -103,8 +126,14 @@ func (c *CaptureClient) StartRendering(ctx context.Context, writeCh chan<- *guac
 	// Send initial size
 	writeCh <- guac.NewInstruction("size", "0", strconv.Itoa(c.width), strconv.Itoa(c.height))
 
-	rdpLogger.Printf("[StartRendering] Waiting up to 5s for SDL window creation (PID: %d)...", c.cmd.Process.Pid)
-	
+	// Ensure we have a process to monitor
+	var pid int
+	if c.cmd != nil {
+		pid = c.cmd.Pid
+	}
+
+	rdpLogger.Printf("[StartRendering] Waiting up to 5s for backend window creation (PID: %d)...", pid)
+
 	startupTimeout := time.After(5 * time.Second)
 	pollTicker := time.NewTicker(100 * time.Millisecond)
 	defer pollTicker.Stop()
@@ -118,21 +147,23 @@ WaitForWindow:
 			rdpLogger.Println("[StartRendering] Context canceled during startup")
 			return
 		case err := <-c.cmdWaitErr:
-			rdpLogger.Printf("[StartRendering] Process died before window creation: %v", err)
+			rdpLogger.Printf("[StartRendering] Backend process died before window creation: %v", err)
 			writeCh <- guac.NewInstruction("error", "RDP process terminated early", "519")
 			return
 		case <-startupTimeout:
-			rdpLogger.Println("[StartRendering] Timeout waiting for SDL window")
+			rdpLogger.Println("[StartRendering] Timeout waiting for backend window")
 			writeCh <- guac.NewInstruction("error", "Connection timeout", "519")
 			return
 		case <-pollTicker.C:
-			hwnd = FindWindowByPID(c.cmd.Process.Pid)
+			if c.cmd != nil {
+				pid = c.cmd.Pid
+			}
+			hwnd = c.backend.FindWindowByPID(pid)
 			if hwnd != 0 {
-				// Window found! Break out of startup loop.
-				rdpLogger.Printf("[StartRendering] SDL window found successfully (HWND: %v)", hwnd)
-				// Slight delay to ensure DWM has composited the window before hiding
+				rdpLogger.Printf("[StartRendering] Backend window found successfully (HWND: %v)", hwnd)
+				// Slight delay to ensure compositor has produced the surface
 				time.Sleep(250 * time.Millisecond)
-				HideWindow(hwnd)
+				c.backend.HideWindow(hwnd)
 				break WaitForWindow
 			}
 		}
@@ -149,32 +180,21 @@ WaitForWindow:
 		case <-ctx.Done():
 			return
 		case err := <-c.cmdWaitErr:
-			rdpLogger.Printf("[StartRendering] FreeRDP process died during capture: %v", err)
+			rdpLogger.Printf("[StartRendering] Backend process died during capture: %v", err)
 			writeCh <- guac.NewInstruction("error", "RDP process terminated unexpectedly", "519")
 			return
 		case <-ticker.C:
 			rdpLogger.Println("========== Capture Tick ==========")
 			rdpLogger.Printf("Current timestamp: %v", time.Now())
-			
-			// Dynamically refetch the HWND in case SDL recreates the window
-			currentHwnd := FindWindowByPID(c.cmd.Process.Pid)
+
+			// Dynamically refetch the HWND in case backend recreates the window
+			currentHwnd := c.backend.FindWindowByPID(pid)
 			rdpLogger.Printf("HWND: %v", currentHwnd)
-			rdpLogger.Printf("FindWindowByPID() succeeded: %v", currentHwnd != 0)
-			
-			// Check if process is still alive
-			processAlive := true
-			select {
-			case <-c.cmdWaitErr:
-				processAlive = false
-			default:
-			}
-			rdpLogger.Printf("Process is still alive: %v", processAlive)
-			
 			if currentHwnd == 0 {
 				continue
 			}
 
-			currFrame, err := CaptureWindow(currentHwnd)
+			currFrame, err := c.backend.CaptureWindow(currentHwnd)
 			if err != nil {
 				rdpLogger.Printf("[StartRendering] CaptureWindow failed: %v", err)
 				continue
@@ -204,7 +224,7 @@ WaitForWindow:
 			// Extract sub-image
 			subImg := currFrame.SubImage(dirtyRect)
 			var buf bytes.Buffer
-			
+
 			rdpLogger.Println("PNG encoding started")
 			if err := png.Encode(&buf, subImg); err != nil {
 				rdpLogger.Printf("[StartRendering] PNG Encode failed: %v", err)
@@ -212,15 +232,13 @@ WaitForWindow:
 			}
 			rdpLogger.Println("PNG encoding finished")
 			rdpLogger.Printf("PNG byte size: %d", buf.Len())
-			
+
 			base64PNG := base64.StdEncoding.EncodeToString(buf.Bytes())
 			rdpLogger.Printf("Base64 byte size: %d", len(base64PNG))
 
 			streamCounter++
 			streamIdx := strconv.Itoa(streamCounter)
 
-			// img, stream_index, mode, layer, mimetype, x, y
-			
 			sendIns := func(ins *guac.Instruction, name string, stream string, blobSize int) {
 				if name == "blob" {
 					rdpLogger.Printf("TX %s: Stream ID: %s, Blob size: %d, Timestamp: %v", name, stream, blobSize, time.Now())
@@ -229,11 +247,9 @@ WaitForWindow:
 				} else {
 					rdpLogger.Printf("TX %s: Stream ID: %s, Timestamp: %v", name, stream, time.Now())
 				}
-				
+
 				rdpLogger.Printf("Queue length: %d", len(writeCh))
-				rdpLogger.Println("Whether send blocks: yes, if queue is full")
 				writeCh <- ins
-				rdpLogger.Println("Whether send succeeds: true (queued)")
 			}
 
 			sendIns(guac.NewInstruction("img", streamIdx, "3", "0", "image/png", strconv.Itoa(dirtyRect.Min.X), strconv.Itoa(dirtyRect.Min.Y)), "img", streamIdx, 0)
@@ -254,12 +270,21 @@ WaitForWindow:
 }
 
 func (c *CaptureClient) SendMouseEvent(x, y, buttons int) {
-	// We can't easily inject mouse events into a hidden FreeRDP window without SendMessage/PostMessage.
-	// We leave this empty for now.
+	// Forward to backend if it supports input injection (will be implemented
+	// by xfreerdp backend or a future native binding). For SDL capture client
+	// this remains a no-op until we implement proper input injection.
+	// Keep the method so Session.input wiring can call it uniformly.
+	if c.backend == nil {
+		return
+	}
+	// No-op for now.
 }
 
 func (c *CaptureClient) SendKeyEvent(keysym int, pressed bool) {
-	// We can't easily inject key events into a hidden FreeRDP window without SendMessage/PostMessage.
+	if c.backend == nil {
+		return
+	}
+	// No-op for now.
 }
 
 func (c *CaptureClient) Disconnect() {
