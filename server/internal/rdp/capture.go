@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"os"
+	"os/exec"
 	"strconv"
 	"time"
 
@@ -23,13 +25,13 @@ var rdpLogger = struct {
 	Println: func(a ...interface{}) { logger.Get("guac.log").Info(fmt.Sprint(a...)) },
 }
 
-// CaptureClient launches an RDP backend process (SDL-based for now) and
-// captures its hidden window. The platform/process-specific behavior is
-// delegated to a Backend implementation to make swapping to xfreerdp easier.
+// CaptureClient manages an RDP backend process and captures its window.
+// Platform/process-specific behavior is delegated to a Backend implementation
+// so we can swap SDL-based launcher for xfreerdp or native bindings later.
 type CaptureClient struct {
 	width      int
 	height     int
-	cmd        *execCmdLike
+	cmd        *exec.Cmd
 	host       string
 	prevImg    *image.RGBA
 
@@ -40,46 +42,32 @@ type CaptureClient struct {
 	backend Backend
 }
 
-// execCmdLike is a tiny adapter so we don't need to import os/exec in this
-// file and can remain flexible for testing. It exposes the fields used here.
-type execCmdLike struct {
-	Pid int
-}
-
-// adaptCmd converts an *exec.Cmd into execCmdLike. The actual Backend.Launch
-// returns an *exec.Cmd but we only need the PID here; adapters keep the
-// coupling narrow.
-func adaptCmd(cmd interface{}) *execCmdLike {
-	// Backend may return nil or an *exec.Cmd. Use reflection lightly to extract
-	// the PID if available. For now, a Backend implementation that returns
-	// a concrete *exec.Cmd will produce a struct with Process.Pid accessible.
-	switch v := cmd.(type) {
-	case *interface{}:
-		_ = v
-	}
-	// Keep a minimal placeholder: the SdlBackend populates pid via Launch and
-	// returns an *exec.Cmd; the adapter will be filled in by SdlBackend.Launch
-	// call sites by setting CaptureClient.cmd directly after Launch.
-	return &execCmdLike{Pid: 0}
-}
-
 func NewCaptureClient() *CaptureClient {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Select backend via environment variable (defaults to sdl for compatibility)
+	backendName := os.Getenv("GUAC_RDP_BACKEND")
+	var backend Backend
+	if backendName == "xfreerdp" {
+		backend = NewXfReeRDPBackend("")
+	} else {
+		backend = NewSdlBackend("")
+	}
+
 	return &CaptureClient{
 		width:      1024,
 		height:     768,
 		processCtx: ctx,
 		cancelProc: cancel,
 		cmdWaitErr: make(chan error, 1),
-		backend:    NewSdlBackend(""),
+		backend:    backend,
 	}
 }
 
 func (c *CaptureClient) Connect(hostname, username, password string) error {
 	c.host = hostname
-	// Build FreeRDP command-line arguments; keep configurable and avoid
-	// hardcoding sensitive values in code for production — these will be
-	// provided by session configuration in later phases.
+	// Build RDP client argv. Keep credentials/config externally provided in
+	// future phases; for now we pass them through.
 	args := []string{
 		"/v:" + hostname,
 		"/u:" + username,
@@ -87,12 +75,11 @@ func (c *CaptureClient) Connect(hostname, username, password string) error {
 		"/w:1024",
 		"/h:768",
 		"/bpp:32",
-		"/cert:ignore",
+		"/cert:ignore", // keep existing behavior for self-signed certs
 		"+sdl-allow-screensaver",
 	}
 
-	// Environment we want to ensure for the SDL process (keeps previous
-	// behavior: force software rendering so PrintWindow works reliably).
+	// Environment we want to ensure for the backend process
 	env := []string{"SDL_RENDER_DRIVER=software"}
 
 	// Launch via backend abstraction
@@ -102,20 +89,17 @@ func (c *CaptureClient) Connect(hostname, username, password string) error {
 		return err
 	}
 
-	// The Backend returned an *exec.Cmd (concrete implementation may vary).
-	// We only need the PID for window lookups and monitoring. SdlBackend
-	// currently returns a real *exec.Cmd; extract PID if possible.
-	if cmd != nil {
-		// try to get PID via reflection-free approach: if backend is SdlBackend
-		// it returns *exec.Cmd and we can access Process.Pid through a type
-		// assertion. To avoid importing os/exec here, SdlBackend will set the
-		// PID via a side-channel by creating an execCmdLike-like object and
-		// returning it. For now, set a best-effort log.
-		rdpLogger.Printf("[Connect] Backend process started successfully")
+	// Store returned values for monitoring and PID lookups
+	c.cmd = cmd
+	if cmdWaitErr != nil {
+		c.cmdWaitErr = cmdWaitErr
 	}
 
-	c.cmd = adaptCmd(nil)
-	c.cmdWaitErr = cmdWaitErr
+	if c.cmd != nil && c.cmd.Process != nil {
+		rdpLogger.Printf("[Connect] Backend process started successfully. PID: %d", c.cmd.Process.Pid)
+	} else {
+		rdpLogger.Printf("[Connect] Backend process started (pid unknown)")
+	}
 
 	return nil
 }
@@ -126,14 +110,13 @@ func (c *CaptureClient) StartRendering(ctx context.Context, writeCh chan<- *guac
 	// Send initial size
 	writeCh <- guac.NewInstruction("size", "0", strconv.Itoa(c.width), strconv.Itoa(c.height))
 
-	// Ensure we have a process to monitor
-	var pid int
-	if c.cmd != nil {
-		pid = c.cmd.Pid
+	pid := 0
+	if c.cmd != nil && c.cmd.Process != nil {
+		pid = c.cmd.Process.Pid
 	}
 
 	rdpLogger.Printf("[StartRendering] Waiting up to 5s for backend window creation (PID: %d)...", pid)
-
+	
 	startupTimeout := time.After(5 * time.Second)
 	pollTicker := time.NewTicker(100 * time.Millisecond)
 	defer pollTicker.Stop()
@@ -147,7 +130,7 @@ WaitForWindow:
 			rdpLogger.Println("[StartRendering] Context canceled during startup")
 			return
 		case err := <-c.cmdWaitErr:
-			rdpLogger.Printf("[StartRendering] Backend process died before window creation: %v", err)
+			rdpLogger.Printf("[StartRendering] Process died before window creation: %v", err)
 			writeCh <- guac.NewInstruction("error", "RDP process terminated early", "519")
 			return
 		case <-startupTimeout:
@@ -155,8 +138,8 @@ WaitForWindow:
 			writeCh <- guac.NewInstruction("error", "Connection timeout", "519")
 			return
 		case <-pollTicker.C:
-			if c.cmd != nil {
-				pid = c.cmd.Pid
+			if c.cmd != nil && c.cmd.Process != nil {
+				pid = c.cmd.Process.Pid
 			}
 			hwnd = c.backend.FindWindowByPID(pid)
 			if hwnd != 0 {
@@ -188,7 +171,10 @@ WaitForWindow:
 			rdpLogger.Printf("Current timestamp: %v", time.Now())
 
 			// Dynamically refetch the HWND in case backend recreates the window
-			currentHwnd := c.backend.FindWindowByPID(pid)
+			currentHwnd := uintptr(0)
+			if c.cmd != nil && c.cmd.Process != nil {
+				currentHwnd = c.backend.FindWindowByPID(c.cmd.Process.Pid)
+			}
 			rdpLogger.Printf("HWND: %v", currentHwnd)
 			if currentHwnd == 0 {
 				continue
@@ -290,5 +276,9 @@ func (c *CaptureClient) SendKeyEvent(keysym int, pressed bool) {
 func (c *CaptureClient) Disconnect() {
 	if c.cancelProc != nil {
 		c.cancelProc()
+	}
+	// If we launched a process, attempt graceful termination
+	if c.cmd != nil && c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
 	}
 }
