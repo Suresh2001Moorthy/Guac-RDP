@@ -111,6 +111,15 @@ func (c *CaptureClient) Connect(hostname, username, password string) error {
 		rdpLogger.Printf("[Connect] Backend process started (pid unknown)")
 	}
 
+	// If the backend provides a direct Connect method (e.g., native backend),
+	// call it so it can perform library-based connection logic.
+	if connector, ok := c.backend.(interface{ Connect(string, string, string) error }); ok {
+		if err := connector.Connect(hostname, username, password); err != nil {
+			rdpLogger.Printf("[Connect] Backend Connect failed: %v", err)
+			return err
+		}
+	}
+
 	return nil
 }
 
