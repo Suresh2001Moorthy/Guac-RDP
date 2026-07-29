@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"image"
 	"image/png"
-	"os"
 	"os/exec"
 	"strconv"
 	"time"
@@ -42,16 +41,23 @@ type CaptureClient struct {
 	backend Backend
 }
 
+func defaultBackend() Backend {
+	// For now, default to SDL backend. In future, we can add build tags or
+	// runtime detection to select the best available backend.
+	return NewSdlBackend("")
+}
+
 func NewCaptureClient() *CaptureClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Select backend via environment variable (defaults via defaultBackend())
-	backendName := os.Getenv("GUAC_RDP_BACKEND")
+	backendName := "sdl"
 	var backend Backend
 	if backendName != "" {
 		if backendName == "xfreerdp" {
 			backend = NewXfReeRDPBackend("")
 		} else if backendName == "sdl" {
+			fmt.Println("sdlll")
 			backend = NewSdlBackend("")
 		} else if backendName == "native" {
 			// Try native backend when explicitly requested

@@ -1,3 +1,6 @@
+//go:build freerdp
+// +build freerdp
+
 #ifndef C_HELPERS_H
 #define C_HELPERS_H
 

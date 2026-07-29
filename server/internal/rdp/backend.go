@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"time"
+	"image"
 )
 
 // Backend abstracts process/window/capture operations so the SDL-specific

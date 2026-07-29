@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"image"
 )
 
 // XfReeRDPBackend launches xfreerdp as a managed process. It implements the

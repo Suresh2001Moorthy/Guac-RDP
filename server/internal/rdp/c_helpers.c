@@ -1,3 +1,6 @@
+//go:build freerdp
+// +build freerdp
+
 #include "c_helpers.h"
 #include <stdlib.h>
 #include <string.h>
