@@ -30,7 +30,8 @@ type Session struct {
 	readCh  chan *guac.Instruction
 	writeCh chan *guac.Instruction
 
-	rdpClient *rdp.CaptureClient
+	rdpClient rdp.Client
+	startOnce sync.Once
 }
 
 // NewSession creates a new session.
@@ -45,6 +46,7 @@ func NewSession(id string, conn *websocket.Conn) *Session {
 		readCh:     make(chan *guac.Instruction, 100),
 		writeCh:    make(chan *guac.Instruction, 100),
 		dispatcher: guac.NewDispatcher(),
+		rdpClient:  rdp.NewGrdpClient(1024, 768),
 	}
 
 	// Wrap websocket connection in custom io.Reader/Writer
@@ -100,6 +102,21 @@ func NewSession(id string, conn *websocket.Conn) *Session {
 		return nil
 	}))
 
+	s.dispatcher.Register("size", guac.HandlerFunc(func(ins *guac.Instruction) error {
+		// Native client handles resize/size independently if supported.
+		s.startOnce.Do(func() {
+			go s.startBackend()
+		})
+		return nil
+	}))
+
+	s.dispatcher.Register("connect", guac.HandlerFunc(func(ins *guac.Instruction) error {
+		s.startOnce.Do(func() {
+			go s.startBackend()
+		})
+		return nil
+	}))
+
 	return s
 }
 
@@ -110,7 +127,14 @@ func (s *Session) Start() {
 	go s.writeWorker()
 
 	s.Send(guac.NewInstruction("", s.ID))
-	s.startBackend()
+	
+	// Fallback start if client doesn't send size within 1 second
+	go func() {
+		time.Sleep(1 * time.Second)
+		s.startOnce.Do(func() {
+			go s.startBackend()
+		})
+	}()
 }
 
 // Wait blocks until the session has completely finished.
@@ -137,8 +161,7 @@ func (s *Session) Send(ins *guac.Instruction) {
 func (s *Session) startBackend() {
 	log.Printf("[Session %s] Connecting to RDP target...", s.ID)
 
-	s.rdpClient = rdp.NewCaptureClient()
-	if err := s.rdpClient.Connect("192.168.1.241", "qaadmin", "Test@123"); err != nil {
+	if err := s.rdpClient.Connect("192.168.1.243", "qaadmin", "Test@123"); err != nil {
 		log.Printf("[Session %s] RDP connect failed: %v", s.ID, err)
 		s.Send(guac.NewInstruction("error", err.Error(), "519"))
 		s.cancel()
