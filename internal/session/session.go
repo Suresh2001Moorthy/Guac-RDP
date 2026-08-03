@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"rdp-web/internal/events"
-	"rdp-web/internal/freerdp"
+	"rdp-web/internal/remote/rdp"
 	"rdp-web/internal/renderer"
 	"rdp-web/internal/transport"
 )
@@ -24,7 +24,7 @@ const (
 
 type Session struct {
 	ID        string
-	rdp       *freerdp.Session
+	rdp       *rdp.Session
 	renderer  renderer.Renderer
 	transport transport.Transport
 
@@ -41,11 +41,11 @@ type Session struct {
 	closeOnce sync.Once
 }
 
-func NewSession(id string, rdpSession *freerdp.Session, rend renderer.Renderer, trans transport.Transport) *Session {
+func NewSession(id string, rdpSess *rdp.Session, rend renderer.Renderer, trans transport.Transport) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Session{
 		ID:          id,
-		rdp:         rdpSession,
+		rdp:         rdpSess,
 		renderer:    rend,
 		transport:   trans,
 		state:       StateInitializing,

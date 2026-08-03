@@ -8,7 +8,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"rdp-web/internal/config"
-	"rdp-web/internal/freerdp"
+	"rdp-web/internal/remote/rdp"
 	"rdp-web/internal/renderer"
 	"rdp-web/internal/session"
 	"rdp-web/internal/transport"
@@ -77,10 +77,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New().String()
 	rend := renderer.NewRawRGBARenderer()
 	trans := transport.NewWSTransport(conn)
-	rdpSession := freerdp.New()
+	rdpSession := rdp.New()
 
 	pf := rend.PixelFormat()
-	if err := rdpSession.Connect(host, user, pass, width, height, freerdp.PixelFormat(pf)); err != nil {
+	if err := rdpSession.Connect(host, user, pass, width, height, rdp.PixelFormat(pf)); err != nil {
 		log.Printf("[%s] RDP connect failed: %v", id, err)
 		conn.Close()
 		return

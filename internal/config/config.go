@@ -23,14 +23,23 @@ func Load() *Config {
 // resolveWebRoot returns an absolute path to the web directory,
 // relative to the executable's location.
 func resolveWebRoot() string {
-	// Try relative to working directory first
+	// Try relative to executable location
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		webPath := filepath.Join(exeDir, "web")
+		if info, err := os.Stat(webPath); err == nil && info.IsDir() {
+			return webPath
+		}
+	}
+	
+	// Fallback to working directory
 	if abs, err := filepath.Abs("web"); err == nil {
 		if info, err := os.Stat(abs); err == nil && info.IsDir() {
 			return abs
 		}
 	}
-	// Fallback to the original hardcoded path for backward compatibility
-	return `C:\Guac-RDP\web`
+	
+	return "web" // Final fallback
 }
 
 func getEnvOrDefault(key, defaultVal string) string {
