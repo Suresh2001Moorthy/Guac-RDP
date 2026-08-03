@@ -161,7 +161,7 @@ func (s *Session) Send(ins *guac.Instruction) {
 func (s *Session) startBackend() {
 	log.Printf("[Session %s] Connecting to RDP target...", s.ID)
 
-	if err := s.rdpClient.Connect("192.168.1.243", "qaadmin", "Test@123"); err != nil {
+	if err := s.rdpClient.Connect("172.24.201.193", "Administrator", "Test@123"); err != nil {
 		log.Printf("[Session %s] RDP connect failed: %v", s.ID, err)
 		s.Send(guac.NewInstruction("error", err.Error(), "519"))
 		s.cancel()

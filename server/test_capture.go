@@ -14,7 +14,7 @@ var (
 
 func main() {
 	// Find window by class name "SDL_app" or title.
-	hwnd, _, _ := findWindow.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("FreeRDP: 192.168.1.241"))))
+	hwnd, _, _ := findWindow.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("FreeRDP: 172.24.201.193"))))
 	if hwnd == 0 {
 		fmt.Println("Window not found")
 		return
