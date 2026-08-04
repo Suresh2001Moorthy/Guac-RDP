@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FreeRDP Web Gateway</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        html, body { 
+            width: 100%; height: 100%; overflow: hidden; 
+            background: linear-gradient(135deg, #09090e 0%, #171728 100%);
+            color: #fff;
+        }
+
+        /* --- Canvas Container --- */
+        #rdp-container {
+            display: none;
+            width: 100%; height: 100%; position: absolute; inset: 0;
+        }
+        #rdp-canvas {
+            display: block;
+            image-rendering: pixelated; /* Will be toggled to auto by app.js if needed */
+            position: absolute;
+            inset: 0;
+            outline: none;
+        }
+
+        /* --- Login Overlay --- */
+        #login-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            backdrop-filter: blur(10px);
+        }
+        
+        /* Glassmorphism Card */
+        .login-card {
+            background: rgba(30, 30, 46, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+            border-radius: 20px;
+            padding: 40px;
+            width: 100%;
+            max-width: 420px;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            animation: float 6s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-8px); }
+            100% { transform: translateY(0px); }
+        }
+
+        .login-card h1 {
+            font-size: 26px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            text-align: center;
+            background: linear-gradient(to right, #4facfe 0%, #00f2fe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .login-card p.subtitle {
+            text-align: center;
+            color: #8a8a9d;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+        .input-group label {
+            display: block;
+            font-size: 13px;
+            color: #a1a1b5;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(15, 15, 26, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 15px;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+        .input-group input:focus {
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.2);
+            background: rgba(15, 15, 26, 0.8);
+        }
+
+        .btn-connect {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+            box-shadow: 0 10px 20px -10px rgba(0, 242, 254, 0.5);
+        }
+        .btn-connect:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 25px -10px rgba(0, 242, 254, 0.7);
+        }
+        .btn-connect:active {
+            transform: translateY(0);
+        }
+
+        /* --- Status --- */
+        #status {
+            position: fixed;
+            left: 50%;
+            transform: translateX(-50%);
+            top: 20px;
+            padding: 12px 24px;
+            border-radius: 30px;
+            background: rgba(0,0,0,0.8);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #fff;
+            font: 14px/1.4 'Inter', sans-serif;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 300ms ease, transform 300ms ease;
+            z-index: 100;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            backdrop-filter: blur(10px);
+        }
+        #status.visible { 
+            opacity: 1; 
+            transform: translateX(-50%) translateY(10px);
+        }
+        #status.error { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.3); }
+        #status.success { color: #69db7c; border-color: rgba(105, 219, 124, 0.3); }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-overlay">
+        <form id="login-form" class="login-card">
+            <h1>RDP</h1>
+            <p class="subtitle">Secure Web Desktop Gateway</p>
+            
+            <div class="input-group">
+                <label for="hostInput">IP / FQDN</label>
+                <input type="text" id="hostInput" placeholder="172.24.201.193 or ad.company.com" required>
+            </div>
+            
+            <div class="input-group">
+                <label for="userInput">Username</label>
+                <input type="text" id="userInput" placeholder="Administrator" required>
+            </div>
+            
+            <div class="input-group">
+                <label for="passInput">Password</label>
+                <input type="password" id="passInput" placeholder="••••••••" required>
+            </div>
+            
+            <button type="submit" class="btn-connect" id="connectBtn">Connect</button>
+        </form>
+    </div>
+
+    <!-- RDP Canvas -->
+    <div id="rdp-container">
+        <canvas id="rdp-canvas" tabindex="0"></canvas>
+    </div>
+
+    <div id="status"></div>
+    <script src="app.js"></script>
+</body>
+</html>
